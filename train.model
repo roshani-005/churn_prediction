@@ -1,0 +1,115 @@
+"""
+Customer Churn Prediction — Model Training
+-------------------------------------------
+Trains and compares Logistic Regression, Random Forest, and XGBoost
+classifiers on customer usage/billing data, selects the best model by
+ROC-AUC, and saves it for serving via the Flask API.
+
+Run:
+    python train_model.py
+"""
+
+import numpy as np
+import pandas as pd
+import joblib
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import roc_auc_score, classification_report
+from xgboost import XGBClassifier
+
+RANDOM_STATE = 42
+np.random.seed(RANDOM_STATE)
+
+
+def generate_synthetic_data(n=5000) -> pd.DataFrame:
+    """Simulates a telecom/SaaS-style customer dataset (swap this out for real data)."""
+    tenure_months = np.random.randint(1, 72, n)
+    monthly_charges = np.round(np.random.uniform(20, 120, n), 2)
+    support_tickets = np.random.poisson(1.5, n)
+    contract_type = np.random.choice(["month_to_month", "one_year", "two_year"], n, p=[0.5, 0.3, 0.2])
+    payment_delay_days = np.random.exponential(3, n)
+    usage_drop_pct = np.random.uniform(-20, 60, n)  # % drop in product usage last 30 days
+
+    # Churn probability driven by realistic-ish rules + noise
+    churn_prob = (
+        0.35 * (contract_type == "month_to_month")
+        + 0.015 * support_tickets
+        + 0.01 * payment_delay_days
+        + 0.004 * usage_drop_pct
+        - 0.004 * tenure_months
+        + 0.15
+    )
+    churn_prob = np.clip(churn_prob, 0, 1)
+    churn = np.random.binomial(1, churn_prob)
+
+    df = pd.DataFrame({
+        "tenure_months": tenure_months,
+        "monthly_charges": monthly_charges,
+        "support_tickets": support_tickets,
+        "contract_type": contract_type,
+        "payment_delay_days": np.round(payment_delay_days, 1),
+        "usage_drop_pct": np.round(usage_drop_pct, 1),
+        "churn": churn,
+    })
+    return df
+
+
+def preprocess(df: pd.DataFrame):
+    df = pd.get_dummies(df, columns=["contract_type"], drop_first=True)
+    X = df.drop(columns=["churn"])
+    y = df["churn"]
+    return X, y
+
+
+def main():
+    df = generate_synthetic_data()
+    X, y = preprocess(df)
+    feature_names = X.columns.tolist()
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=RANDOM_STATE, stratify=y
+    )
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    models = {
+        "Logistic Regression": LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
+        "Random Forest": RandomForestClassifier(n_estimators=200, max_depth=8, random_state=RANDOM_STATE),
+        "XGBoost": XGBClassifier(
+            n_estimators=300, max_depth=4, learning_rate=0.05,
+            eval_metric="logloss", random_state=RANDOM_STATE
+        ),
+    }
+
+    results = {}
+    for name, model in models.items():
+        if name == "Logistic Regression":
+            model.fit(X_train_scaled, y_train)
+            probs = model.predict_proba(X_test_scaled)[:, 1]
+        else:
+            model.fit(X_train, y_train)
+            probs = model.predict_proba(X_test)[:, 1]
+
+        auc = roc_auc_score(y_test, probs)
+        results[name] = {"model": model, "auc": auc}
+        print(f"\n{name} — ROC-AUC: {auc:.4f}")
+        preds = (probs > 0.5).astype(int)
+        print(classification_report(y_test, preds, target_names=["Retained", "Churned"]))
+
+    best_name = max(results, key=lambda k: results[k]["auc"])
+    best_model = results[best_name]["model"]
+    print(f"\nBest model: {best_name} (ROC-AUC = {results[best_name]['auc']:.4f})")
+
+    joblib.dump(best_model, "churn_model.joblib")
+    joblib.dump(scaler, "scaler.joblib")
+    joblib.dump(feature_names, "feature_names.joblib")
+    joblib.dump(best_name, "model_name.joblib")
+    print("Saved: churn_model.joblib, scaler.joblib, feature_names.joblib")
+
+
+if __name__ == "__main__":
+    main()
